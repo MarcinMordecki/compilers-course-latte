@@ -5,7 +5,7 @@ import System.Environment (getArgs)
 import System.IO (hPutStr, stderr)
 import Frontend(runFrontend, FrontendError(Err))
 import System.Exit (exitWith, ExitCode (ExitFailure))
-import CFG(compile)
+import Compiler(compile)
 
 exitError :: String -> ExitCode -> IO a
 exitError str e = hPutStr stderr ("ERROR\n" ++ str ++ "\n") >> exitWith e

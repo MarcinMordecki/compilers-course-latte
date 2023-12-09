@@ -8,7 +8,7 @@ prepare:
 	cd src/build && mkdir lang && cd lang && cp ../../latte.cf latte.cf && /home/students/inf/PUBLIC/MRJP/bin/bnfc --functor -m latte.cf
 	cd src/build/lang && make && cp AbsLatte.hs LexLatte.hs ParLatte.hs ../../
 
-Latte: src/AbsLatte.hs src/LexLatte.hs src/ParLatte.hs src/Frontend.hs src/Main.hs
+Latte: src/AbsLatte.hs src/LexLatte.hs src/ParLatte.hs src/Frontend.hs src/Main.hs src/CFG.hs src/Compiler.hs src/PropagateConstants.hs
 	ghc -isrc --make src/Main.hs -o src/build/Compiler
 	cd src && rm -f *.o *.hi
 	cp src/build/Compiler .

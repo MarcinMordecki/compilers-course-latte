@@ -8,6 +8,7 @@ import Control.Monad (when)
 import Data.Maybe(fromMaybe, isNothing)
 import qualified Data.Map as M
 import qualified AbsLatte as L
+import Data.List(intersect)
 import IR
 import System.IO (hPrint, stderr)
 import System.Exit (exitWith, ExitCode (ExitFailure), exitFailure)
@@ -16,7 +17,10 @@ data Outlinks
   = None
   | Single Blabel
   | Cond Llabel Blabel Blabel
+  | CheckLast Blabel Blabel
   deriving(Show, Eq)
+
+type CFGBMap = M.Map Blabel CFGBlock
 
 data CFGBlock
   = CFGBlock {
@@ -33,33 +37,20 @@ data Store
     idx :: Int,
     bidx :: Int,
     curLabel :: Blabel,
-    blocks :: M.Map Blabel CFGBlock
+    blocks :: CFGBMap
   }
   deriving(Show, Eq)
 
-data BFSOutput
-  = BFSOutput {
-    visited :: [Blabel],
-    to_visit :: [Blabel]
-  }
-
 type CFGIM a = StateT Store IO a
-type OutputIM a = StateT BFSOutput IO a
 
-getFromMapOrErr :: Ord a => a -> M.Map a b -> CFGIM b
+getFromMapOrErr :: Ord a => Show b => Show a => a -> M.Map a b -> CFGIM b
 getFromMapOrErr key map = do
   let v = M.lookup key map in
     case v of
-      Nothing -> liftIO $ print "Error that should never happen unless compilator is faulty\n"
-        >> exitWith (ExitFailure 1)
-      Just x -> return x
-
-getFromMapOrErr2 :: Ord a => a -> M.Map a b -> OutputIM b
-getFromMapOrErr2 key map = do
-  let v = M.lookup key map in
-    case v of
-      Nothing -> liftIO $ print "Error that should never happen unless compilator is faulty\n"
-        >> exitWith (ExitFailure 1)
+      Nothing -> do
+        liftIO $ print $ show key ++ " " ++ show map
+        liftIO $ print "Error that should never happen unless compilator is faulty\n"
+          >> exitWith (ExitFailure 1)
       Just x -> return x
 
 showLlabelIR :: Int -> Llabel
@@ -111,14 +102,14 @@ convertAbsToIR (L.EApp _ ident args) = do
   l <- genLlabelIR
   argsConv <- mapM convertAbsToIR args
   argsRegisters <- mapM getRegisterFromList argsConv
-  return $ IExpr l (Simple $ IApp ident argsRegisters) : concat argsConv
+  return $ IExpr l (IApp ident argsRegisters) : concat argsConv
   where
-  getRegisterFromList :: [IExpr] -> CFGIM Llabel
-  getRegisterFromList [IExpr lhs _] = return lhs
+  getRegisterFromList :: [IExpr] -> CFGIM IExprSimple
+  getRegisterFromList [IExpr lhs _] = return $ ILabel lhs
   getRegisterFromList (x:xt) = getRegisterFromList xt
 convertAbsToIR (L.EString _ s) = do
   l <- genLlabelIR
-  return [IExpr l $ Simple $ ILitString s]
+  return [IExpr l $ ILitString s]
 convertAbsToIR (L.Neg _ x) = do
   irx <- convertAbsToIR x
   mostRecent <- genMostRecentLabelIR
@@ -132,23 +123,72 @@ convertAbsToIR (L.Not _ x) = do
 convertAbsToIR (L.EMul _ a op b) = do
   (ira, la, irb, lb) <- eval2arg a b
   l <- genLlabelIR
-  return $ IExpr l (IMul op la lb) : irb ++ ira -- FIXME mniejszy do większego
+  return $ IExpr l (IBinOp (genOpFromMulOp op) (ILabel la) (ILabel lb)) : irb ++ ira -- FIXME mniejszy do większego
 convertAbsToIR (L.EAdd _ a op b) = do
   (ira, la, irb, lb) <- eval2arg a b
   l <- genLlabelIR
-  return $ IExpr l (IAdd op la lb) : irb ++ ira
+  return $ IExpr l (IBinOp (genOpFromAddOp op) (ILabel la) (ILabel lb)) : irb ++ ira
 convertAbsToIR (L.ERel _ a op b) = do
   (ira, la, irb, lb) <- eval2arg a b
   l <- genLlabelIR
-  return $ IExpr l (IRel op la lb) : irb ++ ira
-convertAbsToIR (L.EAnd _ a b) = do
-  (ira, la, irb, lb) <- eval2arg a b
+  return $ IExpr l (IBinOp (genOpFromRelOp op) (ILabel la) (ILabel lb)) : irb ++ ira
+convertAbsToIR (L.EAnd p a b) = do
+  convertAbsToIR (L.Not p (L.EOr p (L.Not p a) (L.Not p b)))
+convertAbsToIR (L.EOr p a b) = do
+  curBlabel <- getCurrentBlabel
+  afterBlock <- newBlockFromId curBlabel
+  blockChangeOutlink curBlabel $ Single $ label afterBlock
+  bTrue <- newBlockFromId curBlabel
+  bFalse <- newBlockFromId curBlabel
+
+  blockChangeOutlink (label bTrue) $ Single $ label afterBlock
+  blockChangeOutlink (label bFalse) $ Single $ label afterBlock
+
+  bBlock <- newBlockFromId curBlabel
+  aBlock <- newBlockFromId curBlabel
+
+  blockChangeOutlink curBlabel $ Single $ label aBlock
+  blockAddOutgoingInlinks
+
+  blockChangeOutlink (label aBlock) $ CheckLast (label bTrue) (label bBlock)
+  changeBlockAndConvertFunc (label aBlock) [L.SExp p a]
+
+  blockChangeOutlink (label bBlock) $ CheckLast (label bTrue) (label bFalse)
+  changeBlockAndConvertFunc (label bBlock) [L.SExp p b]
+
+  focusAnotherBlock $ label bTrue
+  blockAddQuad $ Simple ILitTrue
+  lit_true <- genMostRecentLabelIR
+  blockAddOutgoingInlinks
+
+  focusAnotherBlock $ label bFalse
+  blockAddQuad $ Simple ILitFalse
+  lit_false <- genMostRecentLabelIR
+  blockAddOutgoingInlinks
+
+  focusAnotherBlock $ label afterBlock
+  let cond_phi = IAOrPhi $ (label bTrue, ILabel lit_true) : [(label bFalse, ILabel lit_false)]
+  blockAddQuad cond_phi
+  res <- genMostRecentLabelIR
   l <- genLlabelIR
-  return $ IExpr l (IAnd la lb) : irb ++ ira
-convertAbsToIR (L.EOr _ a b) = do
-  (ira, la, irb, lb) <- eval2arg a b
-  l <- genLlabelIR
-  return $ IExpr l (IOr la lb) : irb ++ ira
+  return [IExpr l $ Simple $ ILabel res]
+
+genOpFromMulOp :: L.MulOp' a -> ITBinOp
+genOpFromMulOp (L.Times _) = IMul
+genOpFromMulOp (L.Div _) = IDiv
+genOpFromMulOp (L.Mod _) = IMod
+
+genOpFromAddOp :: L.AddOp' a -> ITBinOp
+genOpFromAddOp (L.Plus _) = IPlus
+genOpFromAddOp (L.Minus _) = IMinus
+
+genOpFromRelOp :: L.RelOp' a -> ITBinOp
+genOpFromRelOp (L.EQU _) = IEq
+genOpFromRelOp (L.NE _) = INe
+genOpFromRelOp (L.LTH _) = ILt
+genOpFromRelOp (L.LE _) = ILe
+genOpFromRelOp (L.GTH _) = IGt
+genOpFromRelOp (L.GE _) = IGe
 
 changeBlock :: Blabel -> CFGBlock -> CFGIM ()
 changeBlock bl block = do
@@ -214,12 +254,22 @@ blockAddOutgoingInlinks = do
   case outLinks curB of
     None -> return ()
     Single nxt -> do
-      blockAddQuad $ Simple $ IBr0 nxt
+      blockAddQuad $ IBr0 nxt
       blockAddInlink (label curB) nxt
     Cond c a b -> do
-      blockAddQuad $ Simple $ IBrCond c a b
+      blockAddQuad $ IBrCond c a b
       blockAddInlink (label curB) a
       blockAddInlink (label curB) b
+    CheckLast a b -> do
+      l <- genMostRecentLabelIR
+      blockChangeOutlink (label curB) $ Cond l a b
+      blockAddOutgoingInlinks
+
+blockUpdateVariableTrace :: L.Ident -> CFGIM ()
+blockUpdateVariableTrace ident = do
+  l <- genMostRecentLabelIR
+  curB <- getCurrentBlock
+  changeBlock (label curB) $ curB {vars = M.insert ident l $ vars curB}
 
 blockMakePhi :: [CFGBlock] -> L.Ident -> CFGIM IExpr
 blockMakePhi inblocks v = do
@@ -227,12 +277,13 @@ blockMakePhi inblocks v = do
   l <- genLlabelIR
   blockVs <- mapM (getFromBlock v) inblocks
   changeBlock (label curB) $ curB {vars = M.insert v l $ vars curB}
-  return $ IExpr l $ Simple $ IPhi v blockVs
+  return $ IExpr l $ IPhi v blockVs
   where
-  getFromBlock :: L.Ident -> CFGBlock -> CFGIM (Blabel, Llabel)
+  getFromBlock :: L.Ident -> CFGBlock -> CFGIM (Blabel, IExprSimple)
   getFromBlock v b = do
+    liftIO $ print $ show v ++ " haha " ++ show (vars b)
     bv <- getFromMapOrErr v $ vars b
-    return (label b, bv)
+    return (label b, ILabel bv)
 
 blockAddInitialPhis :: CFGIM ()
 blockAddInitialPhis = do
@@ -246,28 +297,58 @@ blockAddInitialPhis = do
 
 repairPhis :: CFGIM ()
 repairPhis = do
+  liftIO $ print "1"
   curB <- getCurrentBlock
   inblocks <- mapM getBlock $ inLinks curB
-  let inheritedVars = map fst $ M.toList $ vars curB
+  -- FIXME verify: vars curB \cap vars any inblocks is same for any inblocks
+  let inheritedVars = map fst (M.toList $ vars curB) `intersect` map fst (M.toList $ vars $ head inblocks)
+  liftIO $ print inheritedVars
   let all_quads = quads curB
+  liftIO $ print "2"
   phisList <- mapM (blockMakePhi inblocks) inheritedVars
+  liftIO $ print "2.5"
   let phisMap = M.fromList $ map phiExtract phisList
+  liftIO $ print "3"
   repaired_quads <- mapM (repair phisMap) all_quads
-  changeBlock (label curB) $ curB {quads = repaired_quads}
+  liftIO $ print "4"
+  if repaired_quads == quads curB then return () else do
+    changeBlock (label curB) $ curB {quads = repaired_quads}
+    s <- get
+    case outLinks curB of
+      None -> return ()
+      Single x -> do
+        put $ s {curLabel = x}
+        repairPhis
+      Cond c a b -> do
+        put $ s {curLabel = a}
+        repairPhis
+        s <- get
+        put $ s {curLabel = b}
+        repairPhis
+      CheckLast a b -> do -- redundant?
+        put $ s {curLabel = a}
+        repairPhis
+        s <- get
+        put $ s {curLabel = b}
+        repairPhis
   where
-  phiExtract :: IExpr -> (L.Ident, [(Blabel, Llabel)])
-  phiExtract (IExpr _ (Simple (IPhi x lst))) = (x, lst)
-  repair :: M.Map L.Ident [(Blabel, Llabel)] -> IExpr -> CFGIM IExpr
-  repair phisMap (IExpr l (Simple (IPhi x _))) = do
+  phiExtract :: IExpr -> (L.Ident, [(Blabel, IExprSimple)])
+  phiExtract (IExpr _ (IPhi x lst)) = (x, lst)
+  repair :: M.Map L.Ident [(Blabel, IExprSimple)] -> IExpr -> CFGIM IExpr
+  repair phisMap (IExpr l (IPhi x _)) = do
     real_lst <- getFromMapOrErr x phisMap
-    return $ IExpr l $ Simple $ IPhi x real_lst
+    return $ IExpr l $ IPhi x real_lst
   repair phisMap x = return x
 
-changeBlockAndConvertFunc :: Blabel -> [L.Stmt' L.BNFC'Position] -> CFGIM()
-changeBlockAndConvertFunc newBlabel body = do
+focusAnotherBlock :: Blabel -> CFGIM ()
+focusAnotherBlock newBlabel = do
   s <- get
   put $ s {curLabel = newBlabel}
   blockAddInitialPhis
+
+changeBlockAndConvertFunc :: Blabel -> [L.Stmt' L.BNFC'Position] -> CFGIM()
+changeBlockAndConvertFunc newBlabel body = do
+  focusAnotherBlock newBlabel
   relay body
   where
   relay [L.BStmt _ (L.Block _ stmts)] = convertFuncToIR stmts
@@ -276,10 +357,12 @@ changeBlockAndConvertFunc newBlabel body = do
 convertFuncToIR :: [L.Stmt' L.BNFC'Position] -> CFGIM ()
 convertFuncToIR [] = blockAddOutgoingInlinks
 convertFuncToIR ((L.Empty _):st) = convertFuncToIR st
-convertFuncToIR ((L.SExp _ e):st) = convertFuncToIR st
+convertFuncToIR ((L.SExp _ e):st) = do -- will be removed later - unless it's used for AND/OR
+  es <- convertAbsToIR e
+  blockAddManyQuads es
+  convertFuncToIR st
 convertFuncToIR ((L.BStmt _ (L.Block _ stmts)):st) = do
   curBlabel <- getCurrentBlabel
-  xtb <- getCurrentBlock
   afterBlock <- newBlockFromId curBlabel
   blockChangeOutlink curBlabel $ Single $ label afterBlock
   inBlock <- newBlockFromId curBlabel
@@ -306,7 +389,7 @@ convertFuncToIR ((L.Decl _ type_ idents):st) = do
     rest <- addDecls (L.Bool _p) dt
     return $ (x, l) : rest
   addDecls (L.Str _p) ((L.NoInit _ x):dt) = do
-    blockAddQuad $ Simple $ ILitString ""
+    blockAddQuad $ ILitString ""
     l <- genMostRecentLabelIR
     rest <- addDecls (L.Str _p) dt
     return $ (x, l) : rest
@@ -319,23 +402,19 @@ convertFuncToIR ((L.Decl _ type_ idents):st) = do
 convertFuncToIR ((L.Ass _ ident e):st) = do
   es <- convertAbsToIR e
   blockAddManyQuads es
-  l <- genMostRecentLabelIR
-  curB <- getCurrentBlock
-  changeBlock (label curB) $ curB {vars = M.insert ident l $ vars curB}
+  blockUpdateVariableTrace ident
   convertFuncToIR st
-convertFuncToIR ((L.Incr _d x):st) = do
+convertFuncToIR ((L.Incr _ x):st) = do
   curB <- getCurrentBlock
   lx <- getFromMapOrErr x $ vars curB
-  blockAddQuad $ Simple $ ILitInt 1
-  l1 <- genMostRecentLabelIR
-  blockAddQuad $ IAdd (L.Plus _d) lx l1
+  blockAddQuad $ IBinOp IPlus (ILabel lx) (ILitInt 1)
+  blockUpdateVariableTrace x
   convertFuncToIR st
 convertFuncToIR ((L.Decr _d x):st) = do
   curB <- getCurrentBlock
   lx <- getFromMapOrErr x $ vars curB
-  blockAddQuad $ Simple $ ILitInt 1
-  l1 <- genMostRecentLabelIR
-  blockAddQuad $ IAdd (L.Minus _d) lx l1
+  blockAddQuad $ IBinOp IMinus (ILabel lx) (ILitInt 1)
+  blockUpdateVariableTrace x
   convertFuncToIR st
 convertFuncToIR ((L.Ret _ e):st) = do
   s <- get
@@ -399,57 +478,15 @@ convertFuncToIR ((L.While _ expr wb):st) = do
   -- FIXME zmienne indukcyjne?
   blockChangeOutlink (label whileBodyBlock) $ Single $ label whileCondBlock
   changeBlockAndConvertFunc (label whileBodyBlock) [wb]
-  
+
   s <- get
-  put $ s {curLabel = label whileCondBlock} 
-  repairPhis 
+  put $ s {curLabel = label whileCondBlock}
+  liftIO $ print "before repair"
+  repairPhis
+  liftIO $ print "after repair"
 
   changeBlockAndConvertFunc (label afterBlock) st
 
-convertFuncsToIR :: [L.TopDef' L.BNFC'Position] -> IO ()
-convertFuncsToIR [] = return ()
-convertFuncsToIR ((L.FnDef pos ftype (L.Ident fname) fargs (L.Block _ fbody)):ft) = do
-  let blabel = Blabel $ fname ++ "_entry"
-  let bmp = M.singleton blabel $ CFGBlock blabel None [] [] M.empty
-  ((), store) <- runStateT (convertFuncToIR fbody) (Store 1 1 blabel bmp)
-  liftIO $ print blabel
-  ((), _) <- runStateT (printBlocks (blocks store) True) (BFSOutput [] [blabel])
-  convertFuncsToIR ft
 
-printBlocks :: M.Map Blabel CFGBlock -> Bool -> OutputIM ()
-printBlocks blocks suppressFirstName = do
-  s <- get
-  if null $ to_visit s then return () else do
-  let (current : remaining) = to_visit s
-  put $ s {to_visit = remaining, visited = current : visited s}
-  curB <- getFromMapOrErr2 current blocks
-  unless suppressFirstName $ liftIO $ print $ label curB
-  displayQuads $ quads curB
-  let out_blocks = outLinks curB
-  case out_blocks of
-    None -> return ()
-    Single x -> checkNeighbours x
-    Cond _ a b -> do
-      checkNeighbours a
-      checkNeighbours b
-  printBlocks blocks False
-  where
-  checkNeighbours :: Blabel -> OutputIM ()
-  checkNeighbours b = do
-    s <- get
-    if elem b (visited s) || elem b (to_visit s) then
-      return ()
-    else
-      put $ s {to_visit = to_visit s ++ [b]}
-  displayQuads :: [IExpr] -> OutputIM ()
-  displayQuads [] = return ()
-  displayQuads (q:qt) = do
-    displayQuads qt
-    liftIO $ print q
-
-compile :: L.Program' L.BNFC'Position -> IO ()
-compile (L.Program _ prog) = do
-  convertFuncsToIR prog
-  return ()
 
 
