@@ -21,26 +21,24 @@ data PropagateStore
     toSub :: Llabel,
     subWith :: IExprSimple,
     iterCount :: Int,
-    anythingFound :: Bool
+    anythingFound :: Bool,
+    invalidatedInlinks :: [(Blabel, Blabel)]
   }
 
 type PropagateConstantsIM a = StateT PropagateStore IO a
 
-propagateConstants :: PropagateConstantsIM Bool
-propagateConstants = do
+propagateConstants :: Blabel -> PropagateConstantsIM Bool
+propagateConstants entryBlabel = do
   s <- get
   let blist = map snd $ M.toList $ blockMap s
   let foundConsts = map (findConst . quads) blist
-  --liftIO $ print $ foundConsts
   chooseSub foundConsts
   s <- get
-  --liftIO $ print $ toSub s
   if propFound s then do
-    doSub
+    doSub entryBlabel
     s <- get
     put $ s {propFound = False, iterCount = iterCount s + 1, anythingFound = True}
-    --when (iterCount s < 50)
-    propagateConstants
+    propagateConstants entryBlabel
   else do
     gets anythingFound
 
@@ -50,7 +48,7 @@ findConst ((IExpr l (Simple (ILabel l2))):et) = Just $ IExpr l (Simple (ILabel l
 findConst ((IExpr l (Simple (ILitInt v))):et) = Just $ IExpr l (Simple (ILitInt v))
 findConst ((IExpr l (Simple ILitFalse)):et) = Just $ IExpr l (Simple ILitFalse)
 findConst ((IExpr l (Simple ILitTrue)):et) = Just $ IExpr l (Simple ILitTrue)
-findConst ((IExpr l (IPhi c lst)):et) = if testPhi lst l then Just $ IExpr l $ IPhi c lst else findConst et
+findConst ((IExpr l (IPhi c t lst)):et) = if testPhi lst l then Just $ IExpr l $ IPhi c t lst else findConst et
 findConst ((IExpr l (IAOrPhi lst)):et) = if testPhi lst l then Just $ IExpr l $ IAOrPhi lst else findConst et
 findConst (_:et) = findConst et
 
@@ -67,27 +65,54 @@ chooseSub (Nothing:ct) = chooseSub ct
 chooseSub (Just (IExpr l (Simple simp)):ct) = do
   s <- get
   put $ s {propFound = True, toSub = l, subWith = simp}
-chooseSub (Just (IExpr l (IPhi c lst)):ct) = do
+chooseSub (Just (IExpr l (IPhi c t lst)):ct) = do
   s <- get
-  put $ s {propFound = True, toSub = l, subWith = head $ simplifyPhiRhs lst l}
+  let simp = simplifyPhiRhs lst l
+  put $ s {propFound = True, toSub = l, subWith = if null simp then ILabel l else head $ simplifyPhiRhs lst l}
 chooseSub (Just (IExpr l (IAOrPhi lst)):ct) = do -- FIXME redundant?
   s <- get
   put $ s {propFound = True, toSub = l, subWith = head $ simplifyPhiRhs lst l}
 
 
-doSub :: PropagateConstantsIM ()
-doSub = do
+doSub :: Blabel -> PropagateConstantsIM ()
+doSub entryBlabel = do
   s <- get
   bs <- mapM substitute $ M.toList $ blockMap s
   put $ s {blockMap = M.fromList bs}
+  findUnreachableBlocks entryBlabel
+  bs2 <- mapM cutInvalidatedPhi bs
+  put $ s {blockMap = M.fromList bs2}
   where
+  cutInvalidatedPhi :: (Blabel, CFGBlock) -> PropagateConstantsIM (Blabel, CFGBlock)
+  cutInvalidatedPhi (curBlabel, b) = do
+    s <- get
+    let icut = map fst $ filter (\iil -> snd iil == curBlabel) $ invalidatedInlinks s
+    return (curBlabel, b {quads = map (cutInvalidatedFromPhi icut) $ quads b})
+    where
+    cutInvalidatedFromPhi :: [Blabel]  -> IExpr -> IExpr
+    cutInvalidatedFromPhi icut (IExpr l (IPhi c t plist)) = IExpr l $ IPhi c t $ filter (\phi -> fst phi `notElem` icut) plist
+    cutInvalidatedFromPhi icut e = e
   substitute :: (Blabel, CFGBlock) -> PropagateConstantsIM (Blabel, CFGBlock)
-  substitute (l, b) = do
+  substitute (curBlabel, b) = do
     s <- get
     let subed = toSub s
     let subBy = subWith s
     qsub <- mapM (substituteWithinQuad subed subBy) $ quads b
-    return (l, b {quads = qsub})
+    newb <- checkOutlink $ b {quads = qsub}
+    return (curBlabel, newb)
+    where
+    checkOutlink :: CFGBlock -> PropagateConstantsIM CFGBlock
+    checkOutlink b =
+      if null $ quads b then return b else
+        case outLinks b of
+          Cond c l r ->
+            case head $ quads b of
+              IExpr _ (IBr0 newlink) -> do
+                s <- get
+                put $ s {invalidatedInlinks = (label b, if newlink == l then r else l):invalidatedInlinks s}
+                return $ b {outLinks = Single newlink}
+              _ -> return b
+          _ -> return b
   substituteWithinQuad :: Llabel -> IExprSimple -> IExpr -> PropagateConstantsIM IExpr
   substituteWithinQuad subed subBy (IExpr l (Simple (ILabel l2))) = do
     if l == subed then
@@ -103,23 +128,23 @@ doSub = do
     else
       return $ IExpr l $ Simple v
   substituteWithinQuad subed subBy (IExpr l (IBrCond c a b)) = do
-    if c /= subed then return $ IExpr l (IBrCond c a b) else
+    if c /= subed then return $ IExpr l (IBrCond c a b) else do
       case subBy of -- FIXME FIXME modify Outlinks!
         ILitFalse -> return $ IExpr l $ IBr0 b
         ILitTrue -> return $ IExpr l $ IBr0 a
         ILabel c2 -> return $ IExpr l $ IBrCond c2 a b
         -- FIXME add unable to optimize error
-  substituteWithinQuad subed subBy (IExpr l (IPhi c phis)) = do
+  substituteWithinQuad subed subBy (IExpr l (IPhi c t phis)) = do
     if l == subed then return $ IExpr l $ Simple subBy
     else do
       phiSubed <- mapM (substituteWithinPhi subed subBy) phis
-      return $ IExpr l $ IPhi c phiSubed
+      return $ IExpr l $ IPhi c t phiSubed
   substituteWithinQuad subed subBy (IExpr l (IAOrPhi phis)) = do
     phiSubed <- mapM (substituteWithinPhi subed subBy) phis
     return $ IExpr l $ IAOrPhi phiSubed
-  substituteWithinQuad subed subBy (IExpr l (IApp f args)) = do
+  substituteWithinQuad subed subBy (IExpr l (IApp f t targs args)) = do
     argSubed <- mapM (substituteListOfLabels subed subBy) args
-    return $ IExpr l $ IApp f argSubed
+    return $ IExpr l $ IApp f t targs argSubed
     where
     substituteListOfLabels :: Llabel -> IExprSimple -> IExprSimple -> PropagateConstantsIM IExprSimple
     substituteListOfLabels subed subBy l = do
@@ -139,8 +164,41 @@ doSub = do
     (IExpr _ (Simple xsub)) <- substituteWithinQuad subed subBy $ IExpr l $ Simple x
     return $ IExpr l $ IRet xsub
   substituteWithinQuad subed subBy unmatched = return unmatched -- matchowanie and/ora?
-
   substituteWithinPhi :: Llabel -> IExprSimple -> (Blabel, IExprSimple) -> PropagateConstantsIM (Blabel, IExprSimple)
   substituteWithinPhi subed subBy (b, l) = do
     if l == ILabel subed then return (b, subBy)
     else return (b, l)
+
+findUnreachableBlocks :: Blabel -> PropagateConstantsIM ()
+findUnreachableBlocks entry = do
+  blocks <- gets blockMap
+  ((), bfsout) <- liftIO $ runStateT (bfs blocks) $ BFSOutput [] [entry]
+  let unreachable = filter (\b -> label b `notElem` visited bfsout) (map snd $ M.toList blocks)
+  mapM_ markOutlinks unreachable
+  where
+  markOutlinks :: CFGBlock -> PropagateConstantsIM ()
+  markOutlinks b = do
+    s <- get
+    case outLinks b of
+      None -> return ()
+      Single next -> put $ s {invalidatedInlinks = (label b, next) : invalidatedInlinks s}
+      Cond _ nexta nextb -> put $ s {invalidatedInlinks = (label b, nexta) : (label b, nextb) : invalidatedInlinks s}
+
+  bfs :: M.Map Blabel CFGBlock -> OutputIM ()
+  bfs blocks = do
+    s <- get
+    unless (null $ to_visit s) $ do
+      let (v:rest) = to_visit s
+      put $ s {to_visit = rest, visited = v : visited s}
+      b <- getFromMapOrErr2 v blocks
+      case outLinks b of
+        None -> return ()
+        Single nextb -> bfsCheck nextb
+        Cond _ nexta nextb -> do
+          bfsCheck nexta
+          bfsCheck nextb
+      bfs blocks
+  bfsCheck :: Blabel -> OutputIM ()
+  bfsCheck next = do
+    s <- get
+    unless (elem next (to_visit s) || elem next (visited s)) $ put $ s {to_visit = next : to_visit s}
