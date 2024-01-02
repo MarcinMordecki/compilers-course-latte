@@ -19,20 +19,34 @@ instance Show LabelType where
   show LI32 = "i32"
   show LVoid = "void"
 
-data Llabel = Llabel String
-  deriving (Eq, Ord, Read)
+data Llabel = Llabel String LabelType
+  deriving (Eq)
 instance Show Llabel where
-  show (Llabel l) = "%" ++ l
+  show (Llabel l _) = "%" ++ l
+instance Ord Llabel where
+  (Llabel l1 _) `compare` (Llabel l2 _) = l1 `compare` l2
+
+getLabelType (Llabel l t) = t
 
 newtype Slabel = Slabel String
   deriving (Eq, Ord, Read, Data.String.IsString)
 instance Show Slabel where
-  show (Slabel l) = "@" ++ l
+  show (Slabel l) = l
 
 newtype Blabel = Blabel String
   deriving (Eq, Ord, Read, Data.String.IsString)
 instance Show Blabel where
   show (Blabel b) = "%" ++ b
+
+data IStringConstant
+  = IStringConstant {
+    slabel :: Slabel,
+    len :: Int,
+    content :: String
+  }
+  deriving (Eq)
+instance Show IStringConstant where
+  show (IStringConstant sl le cont) = show sl ++ " = private constant [" ++ show (le + 1) ++ " x i8] c\"" ++ cont ++ "\\00\""   
 
 data IExprSimple
   = ILabel Llabel
@@ -42,7 +56,7 @@ data IExprSimple
   deriving (Eq)
 
 instance Show IExprSimple where
-  show (ILabel (Llabel x)) = "%" ++ x
+  show (ILabel (Llabel x _)) = "%" ++ x
   show (ILitInt x) = show x
   show ILitTrue = "true"
   show ILitFalse = "false"
@@ -94,25 +108,40 @@ data IExpr'
   | IOr IExprSimple IExprSimple
   | IRet IExprSimple
   | IVRet
-  | ILitString String
+  -- | ILitString String
+  | IStringBitcast IStringConstant
+  | IStringCmp Llabel Llabel
   deriving (Eq)
 instance Show IExpr' where
   show (Simple x) = show x
   show (IBr0 x) = "br label " ++ show x
   show (IBrCond c a b) = "br i1 " ++ show c ++ ", label " ++ show a ++ ", label " ++ show b
   show (IPhi _ t x) = "phi " ++ show t ++ displayPhiList x
-  show (IAOrPhi x) = show $ IPhi (Llabel "") LI1 x
+  show (IAOrPhi x) = show $ IPhi (Llabel "" LI1) LI1 x
   show (IApp (L.Ident f) t stype s) = "call " ++ show t ++ " @" ++ f ++ "(" ++ displayArgs (zip stype s) ++ ")"
   show (INeg x) = show (IBinOp IMinus (ILitInt 0) x)
   show (INot x) = "xor i1 1, " ++ show x
-  show (IBinOp o a b) = show o ++ " " ++ show a ++ ", " ++ show b
+  show (IBinOp o a b) = show o ++ (if o == IEq || o == INe then " " ++ addTypeIfEqTest a ++ " " else " ") ++ show a ++ ", " ++ show b
+    where
+    addTypeIfEqTest :: IExprSimple -> String
+    addTypeIfEqTest (ILabel l) = show $ getLabelType l
+    addTypeIfEqTest (ILitInt _) = show LI32
+    addTypeIfEqTest ILitTrue = show LI1
+    addTypeIfEqTest ILitFalse = show LI1
   show (IAnd a b) = show a ++ " && " ++ show b
   show (IOr a b) = show a ++ " || " ++ show b
-  show (IRet e) = "ret i32 " ++ show e
+  show (IRet e) = "ret " ++ getType e ++ " " ++ show e
+    where 
+    getType :: IExprSimple -> String
+    getType (ILabel l) = show $ getLabelType l
+    getType (ILitInt _) = show LI32
+    getType ILitFalse = show LI1
+    getType ILitTrue = show LI1
   show IVRet = "ret void"
-  show (ILitString x) = "FIXME ADD STRINGS!!!1 " ++ x
+  -- show (ILitString x) = "FIXME ADD STRINGS!!!1 " ++ x
+  show (IStringBitcast (IStringConstant sl len _)) = "bitcast [" ++ show (len + 1) ++ " x i8]* " ++ show sl ++ " to i8*"
 
-reservedFuncs = ["printInt", "printString", "error", "readInt", "readString", "main"]
+reservedFuncs = ["printInt", "printString", "error", "readInt", "readString", "main", "stringeq", "concat"]
 
 modifyFname :: String -> String
 modifyFname fname = if fname `elem` reservedFuncs then fname else fname ++ "_entry"  -- FIXME think it over
@@ -148,18 +177,8 @@ data IExpr
   | KilledIExpr
   deriving (Eq)
 instance Show IExpr where
-  show (IExpr (Llabel lhs) expr) = display lhs expr ++ "\n"
+  show (IExpr (Llabel lhs _) expr) = display lhs expr ++ "\n"
   show KilledIExpr = ""
-
-data IStringConstant
-  = IStringConstant {
-    slabel :: Slabel,
-    len :: Int,
-    content :: String
-  }
-  deriving (Eq)
-instance Show IStringConstant where
-  show (IStringConstant sl le cont) = show sl ++ " = private constant [" ++ show le ++ " x i8] c" ++ show cont   
 
 data BFSOutput
   = BFSOutput {
@@ -169,10 +188,12 @@ data BFSOutput
 
 type OutputIM a = StateT BFSOutput IO a
 
-getFromMapOrErr2 :: Ord a => a -> M.Map a b -> OutputIM b
+getFromMapOrErr2 :: Show a => Show b => Ord a => a -> M.Map a b -> OutputIM b
 getFromMapOrErr2 key map = do
   let v = M.lookup key map in
     case v of
-      Nothing -> liftIO $ print "Error that should never happen unless compilator is faulty\n"
-        >> exitWith (ExitFailure 1)
+      Nothing -> do
+        liftIO $ print $ show key
+        liftIO $ print "Error2 that should never happen unless compilator is faulty\n"
+          >> exitWith (ExitFailure 1)
       Just x -> return x

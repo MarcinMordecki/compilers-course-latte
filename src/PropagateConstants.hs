@@ -16,7 +16,7 @@ import System.Exit (exitWith, ExitCode (ExitFailure), exitFailure)
 
 data PropagateStore
   = PropagateStore {
-    blockMap :: M.Map Blabel CFGBlock,
+    blockMap :: CFGBMap,
     propFound :: Bool,
     toSub :: Llabel,
     subWith :: IExprSimple,
@@ -37,7 +37,7 @@ propagateConstants entryBlabel = do
   if propFound s then do
     doSub entryBlabel
     s <- get
-    put $ s {propFound = False, iterCount = iterCount s + 1, anythingFound = True}
+    put $ s {propFound = False, iterCount = iterCount s + 1, anythingFound = True, invalidatedInlinks = []}
     propagateConstants entryBlabel
   else do
     gets anythingFound
@@ -78,19 +78,28 @@ doSub :: Blabel -> PropagateConstantsIM ()
 doSub entryBlabel = do
   s <- get
   bs <- mapM substitute $ M.toList $ blockMap s
+  -- above call modifies the "invalidatedInLinks" list as well. 
+  s <- get
   put $ s {blockMap = M.fromList bs}
-  findUnreachableBlocks entryBlabel
+  --mapM_ (\x -> liftIO $ print $ show (fst x) ++ " ") bs
+  unreachable <- findUnreachableBlocks entryBlabel
+  --liftIO $ print $ "MUY IMPORTANTE!!!!!!!!!!! " ++ show unreachable
+  s <- get
   bs2 <- mapM cutInvalidatedPhi bs
-  put $ s {blockMap = M.fromList bs2}
+  put $ s {blockMap = M.fromList $ filter (\(l, b) -> l `notElem` unreachable) bs2}
   where
   cutInvalidatedPhi :: (Blabel, CFGBlock) -> PropagateConstantsIM (Blabel, CFGBlock)
   cutInvalidatedPhi (curBlabel, b) = do
     s <- get
     let icut = map fst $ filter (\iil -> snd iil == curBlabel) $ invalidatedInlinks s
-    return (curBlabel, b {quads = map (cutInvalidatedFromPhi icut) $ quads b})
+    return (curBlabel, b {
+      quads = map (cutInvalidatedFromPhi icut) $ quads b,
+      inLinks = filter (\x -> notElem x $ icut) $ inLinks b
+      })
     where
     cutInvalidatedFromPhi :: [Blabel]  -> IExpr -> IExpr
     cutInvalidatedFromPhi icut (IExpr l (IPhi c t plist)) = IExpr l $ IPhi c t $ filter (\phi -> fst phi `notElem` icut) plist
+    cutInvalidatedFromPhi icut (IExpr l (IAOrPhi plist)) = IExpr l $ IAOrPhi $ filter (\phi -> fst phi `notElem` icut) plist
     cutInvalidatedFromPhi icut e = e
   substitute :: (Blabel, CFGBlock) -> PropagateConstantsIM (Blabel, CFGBlock)
   substitute (curBlabel, b) = do
@@ -99,19 +108,21 @@ doSub entryBlabel = do
     let subBy = subWith s
     qsub <- mapM (substituteWithinQuad subed subBy) $ quads b
     newb <- checkOutlink $ b {quads = qsub}
+    s <- get
     return (curBlabel, newb)
     where
     checkOutlink :: CFGBlock -> PropagateConstantsIM CFGBlock
     checkOutlink b =
-      if null $ quads b then return b else
+      if null $ quads b then return b else do
         case outLinks b of
-          Cond c l r ->
+          Cond c l r -> do
             case head $ quads b of
               IExpr _ (IBr0 newlink) -> do
                 s <- get
                 put $ s {invalidatedInlinks = (label b, if newlink == l then r else l):invalidatedInlinks s}
                 return $ b {outLinks = Single newlink}
-              _ -> return b
+              _ -> do
+                return b
           _ -> return b
   substituteWithinQuad :: Llabel -> IExprSimple -> IExpr -> PropagateConstantsIM IExpr
   substituteWithinQuad subed subBy (IExpr l (Simple (ILabel l2))) = do
@@ -122,26 +133,30 @@ doSub entryBlabel = do
         return $ IExpr l $ Simple subBy
       else
         return $ IExpr l $ Simple (ILabel l2)
-  substituteWithinQuad subed subBy (IExpr l (Simple v)) = do -- not sure about this 1
+  substituteWithinQuad subed subBy (IExpr l (Simple v)) = do -- FIXME not sure about this 1
     if l == subed then
       return KilledIExpr
     else
       return $ IExpr l $ Simple v
   substituteWithinQuad subed subBy (IExpr l (IBrCond c a b)) = do
     if c /= subed then return $ IExpr l (IBrCond c a b) else do
-      case subBy of -- FIXME FIXME modify Outlinks!
-        ILitFalse -> return $ IExpr l $ IBr0 b
-        ILitTrue -> return $ IExpr l $ IBr0 a
+      case subBy of
+        ILitFalse -> do
+          return $ IExpr l $ IBr0 b
+        ILitTrue -> do
+          return $ IExpr l $ IBr0 a
         ILabel c2 -> return $ IExpr l $ IBrCond c2 a b
-        -- FIXME add unable to optimize error
+        _ -> fail "unable to optimize in Propagate Constants / substituteWithinQuad" -- impossible
   substituteWithinQuad subed subBy (IExpr l (IPhi c t phis)) = do
     if l == subed then return $ IExpr l $ Simple subBy
     else do
       phiSubed <- mapM (substituteWithinPhi subed subBy) phis
       return $ IExpr l $ IPhi c t phiSubed
   substituteWithinQuad subed subBy (IExpr l (IAOrPhi phis)) = do
-    phiSubed <- mapM (substituteWithinPhi subed subBy) phis
-    return $ IExpr l $ IAOrPhi phiSubed
+    if l == subed then return $ IExpr l $ Simple subBy
+    else do
+      phiSubed <- mapM (substituteWithinPhi subed subBy) phis
+      return $ IExpr l $ IAOrPhi phiSubed
   substituteWithinQuad subed subBy (IExpr l (IApp f t targs args)) = do
     argSubed <- mapM (substituteListOfLabels subed subBy) args
     return $ IExpr l $ IApp f t targs argSubed
@@ -169,12 +184,15 @@ doSub entryBlabel = do
     if l == ILabel subed then return (b, subBy)
     else return (b, l)
 
-findUnreachableBlocks :: Blabel -> PropagateConstantsIM ()
+findUnreachableBlocks :: Blabel -> PropagateConstantsIM [Blabel]
 findUnreachableBlocks entry = do
   blocks <- gets blockMap
+  --liftIO $ print "bfs"
   ((), bfsout) <- liftIO $ runStateT (bfs blocks) $ BFSOutput [] [entry]
+  --liftIO $ print "bfs end"
   let unreachable = filter (\b -> label b `notElem` visited bfsout) (map snd $ M.toList blocks)
   mapM_ markOutlinks unreachable
+  return $ map label unreachable
   where
   markOutlinks :: CFGBlock -> PropagateConstantsIM ()
   markOutlinks b = do
@@ -184,21 +202,25 @@ findUnreachableBlocks entry = do
       Single next -> put $ s {invalidatedInlinks = (label b, next) : invalidatedInlinks s}
       Cond _ nexta nextb -> put $ s {invalidatedInlinks = (label b, nexta) : (label b, nextb) : invalidatedInlinks s}
 
-  bfs :: M.Map Blabel CFGBlock -> OutputIM ()
+  bfs :: CFGBMap  -> OutputIM ()
   bfs blocks = do
     s <- get
     unless (null $ to_visit s) $ do
       let (v:rest) = to_visit s
+      --liftIO $ putStr $ show v ++ "   "
       put $ s {to_visit = rest, visited = v : visited s}
       b <- getFromMapOrErr2 v blocks
+      --liftIO $ putStr $ show (outLinks b) ++ " xd " ++ show (inLinks b) ++ "   " 
       case outLinks b of
         None -> return ()
         Single nextb -> bfsCheck nextb
         Cond _ nexta nextb -> do
           bfsCheck nexta
           bfsCheck nextb
+      --liftIO $ putStr "\n"
       bfs blocks
   bfsCheck :: Blabel -> OutputIM ()
   bfsCheck next = do
     s <- get
+    --liftIO $ putStr $ show next ++ " "
     unless (elem next (to_visit s) || elem next (visited s)) $ put $ s {to_visit = next : to_visit s}

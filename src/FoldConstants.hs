@@ -14,21 +14,22 @@ import qualified Data.List as LST
 import System.IO (hPrint, stderr)
 import System.Exit (exitWith, ExitCode (ExitFailure), exitFailure)
 
-foldConstants :: M.Map Blabel CFGBlock -> IO (Bool, M.Map Blabel CFGBlock)
+foldConstants :: CFGBMap -> IO (Bool, CFGBMap)
 foldConstants b = do
-  let b' = M.map (\block -> block {quads = map foldC $ quads block}) b
+  let b' = M.map (\block -> block {quads = filter (/= KilledIExpr) $ map foldC $ quads block}) b
   return (b /= b', b')
 
 foldC :: IExpr -> IExpr 
 foldC (IExpr l (INot ILitFalse)) = IExpr l $ Simple ILitTrue
 foldC (IExpr l (INot ILitTrue)) = IExpr l $ Simple ILitFalse
+foldC (IExpr l (INeg (ILitInt a))) = IExpr l $ Simple $ ILitInt (-a)
 foldC (IExpr l (IBinOp op (ILitInt a) (ILitInt b))) = IExpr l $ Simple $ applyIntOp op a b
   where 
   applyIntOp IPlus a b = ILitInt $ a + b
   applyIntOp IMinus a b = ILitInt $ a - b
   applyIntOp IMul a b = ILitInt $ a * b
   applyIntOp IDiv a b = ILitInt $ a `div` b
-  applyIntOp IMod a b = ILitInt $ a `mod` b
+  applyIntOp IMod a b = ILitInt $ a `rem` b
   applyIntOp IEq a b = if a == b then ILitTrue else ILitFalse
   applyIntOp INe a b = if a /= b then ILitTrue else ILitFalse
   applyIntOp IGe a b = if a >= b then ILitTrue else ILitFalse

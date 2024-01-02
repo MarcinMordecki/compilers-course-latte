@@ -39,11 +39,13 @@ type FuncTypesMap = M.Map L.Ident (LabelType, [LabelType])
 data Store
   = Store {
     idx :: Int,
+    mostRecentLabelType :: LabelType,
     bidx :: Int,
     curLabel :: Blabel,
     blocks :: CFGBMap,
     funcTypes :: FuncTypesMap,
-    stringConstants :: [IStringConstant]
+    stringConstants :: M.Map String IStringConstant,
+    sidx :: Int
   }
   deriving(Show, Eq)
 
@@ -64,17 +66,21 @@ getFromMapOrErr key map = do
           >> exitWith (ExitFailure 1)
       Just x -> return x
 
-showLlabelIR :: Int -> Llabel
-showLlabelIR v = Llabel $ "i_" ++ show v
+-- FIXME showLlabel sounds counterintuitive
+showLlabelIR :: Int -> LabelType -> Llabel
+showLlabelIR v = Llabel ("i_" ++ show v)
 
 showBlabelIR :: Int -> Blabel
 showBlabelIR v = Blabel $ "b_" ++ show v
 
-genLlabelIR :: CFGIM Llabel
-genLlabelIR = do
+showSlabelIR :: Int -> Slabel
+showSlabelIR v = Slabel $ "@s" ++ show v
+
+genLlabelIR :: LabelType -> CFGIM Llabel
+genLlabelIR lt = do
   s <- get
-  put $ s {idx = idx s + 1}
-  return $ showLlabelIR $ idx s + 1
+  put $ s {idx = idx s + 1, mostRecentLabelType = lt}
+  return $ showLlabelIR (idx s + 1) lt
 
 genBlabelIR :: CFGIM Blabel
 genBlabelIR = do
@@ -84,7 +90,16 @@ genBlabelIR = do
 
 genMostRecentLabelIR :: CFGIM Llabel
 genMostRecentLabelIR = do
-  gets (showLlabelIR . idx)
+  s <- get
+  return $ showLlabelIR (idx s) (mostRecentLabelType s)
+
+addStringConstant :: String -> CFGIM IStringConstant
+addStringConstant str = do
+  s <- get
+  let sx = sidx s + 1
+  let sc = IStringConstant (showSlabelIR sx) (length str) str
+  put $ s {stringConstants = M.insert str sc $ stringConstants s, sidx = sx}
+  return sc
 
 eval2arg :: L.Expr -> L.Expr -> CFGIM ([IExpr], Llabel, [IExpr], Llabel)
 eval2arg a b = do
@@ -96,59 +111,74 @@ eval2arg a b = do
 
 convertAbsToIR :: L.Expr -> CFGIM [IExpr]
 convertAbsToIR (L.EVar _ x) = do
-  l <- genLlabelIR
   xDefLabel <- getIdentDefLabel x
   curB <- getCurrentBlock
   lx <- getFromMapOrErr xDefLabel $ vars curB
+  l <- genLlabelIR $ getLabelType lx
   return [IExpr l $ Simple $ ILabel lx]
 convertAbsToIR (L.ELitInt _ c) = do
-  l <- genLlabelIR
+  l <- genLlabelIR LI32
   return [IExpr l $ Simple $ ILitInt c]
 convertAbsToIR (L.ELitTrue _) = do
-  l <- genLlabelIR
+  l <- genLlabelIR LI1
   return [IExpr l $ Simple ILitTrue]
 convertAbsToIR (L.ELitFalse _) = do
-  l <- genLlabelIR
+  l <- genLlabelIR LI1
   return [IExpr l $ Simple ILitFalse]
 convertAbsToIR (L.EApp _ ident args) = do
-  l <- genLlabelIR
   argsConv <- mapM convertAbsToIR args
   argsRegisters <- mapM getRegisterFromList argsConv
   s <- get
   (fret, fargTypes) <- getFromMapOrErr ident $ funcTypes s
+  l <- genLlabelIR fret
   return $ IExpr l (IApp ident fret fargTypes argsRegisters) : concat argsConv
   where
   getRegisterFromList :: [IExpr] -> CFGIM IExprSimple
   getRegisterFromList ((IExpr lhs _ ):_) = return $ ILabel lhs
-convertAbsToIR (L.EString _ s) = do
-  let slen = length s
-  blockAddQuad $ Simple $ ILitInt $ toInteger slen
-  slen_reg <- genMostRecentLabelIR
-  
-  l <- genLlabelIR
-  return [IExpr l $ ILitString s]
+convertAbsToIR (L.EString _ str) = do
+  s <- get
+  sc <- if M.member str $ stringConstants s then do
+    getFromMapOrErr str $ stringConstants s
+  else
+    addStringConstant str
+  l <- genLlabelIR LI8
+  return [IExpr l $ IStringBitcast sc]
 convertAbsToIR (L.Neg _ x) = do
   irx <- convertAbsToIR x
   mostRecent <- genMostRecentLabelIR
-  l <- genLlabelIR
+  l <- genLlabelIR LI32
   return $ IExpr l (INeg $ ILabel mostRecent) : irx
 convertAbsToIR (L.Not _ x) = do
   irx <- convertAbsToIR x
   mostRecent <- genMostRecentLabelIR
-  l <- genLlabelIR
+  l <- genLlabelIR LI1
   return $ IExpr l (INot $ ILabel mostRecent) : irx
 convertAbsToIR (L.EMul _ a op b) = do
   (ira, la, irb, lb) <- eval2arg a b
-  l <- genLlabelIR
+  l <- genLlabelIR $ getLabelType la
   return $ IExpr l (IBinOp (genOpFromMulOp op) (ILabel la) (ILabel lb)) : irb ++ ira -- FIXME mniejszy do większego
 convertAbsToIR (L.EAdd _ a op b) = do
   (ira, la, irb, lb) <- eval2arg a b
-  l <- genLlabelIR
-  return $ IExpr l (IBinOp (genOpFromAddOp op) (ILabel la) (ILabel lb)) : irb ++ ira
+  if getLabelType la == LI8 then do
+    l <- genLlabelIR LI8
+    return $ IExpr l (IApp (L.Ident "concat") LI8 [LI8, LI8] [ILabel la, ILabel lb]) : irb ++ ira
+  else do
+    l <- genLlabelIR $ getLabelType la
+    return $ IExpr l (IBinOp (genOpFromAddOp op) (ILabel la) (ILabel lb)) : irb ++ ira
 convertAbsToIR (L.ERel _ a op b) = do
   (ira, la, irb, lb) <- eval2arg a b
-  l <- genLlabelIR
-  return $ IExpr l (IBinOp (genOpFromRelOp op) (ILabel la) (ILabel lb)) : irb ++ ira
+  if getLabelType la == LI8 then do
+    l <- genLlabelIR LI8
+    let strcmpCall = IExpr l $ IApp (L.Ident "stringeq") LI8 [LI8, LI8] [ILabel la, ILabel lb]
+    ll <- genLlabelIR LI1
+    case op of
+      (L.EQU _) ->
+        return $ IExpr ll (IBinOp IEq (ILabel l) (ILitInt 0)) : strcmpCall : irb ++ ira
+      (L.NE _) ->
+        return $ IExpr ll (IBinOp IEq (ILabel l) (ILitInt 1)) : strcmpCall : irb ++ ira
+  else do
+    l <- genLlabelIR LI1
+    return $ IExpr l (IBinOp (genOpFromRelOp op) (ILabel la) (ILabel lb)) : irb ++ ira
 convertAbsToIR (L.EAnd p a b) = do
   convertAbsToIR (L.Not p (L.EOr p (L.Not p a) (L.Not p b)))
 convertAbsToIR (L.EOr p a b) = do
@@ -174,20 +204,20 @@ convertAbsToIR (L.EOr p a b) = do
   changeBlockAndConvertFunc (label bBlock) [L.SExp p b]
 
   focusAnotherBlock $ label bTrue
-  blockAddQuad $ Simple ILitTrue
+  blockAddQuad LI1 $ Simple ILitTrue
   lit_true <- genMostRecentLabelIR
   blockAddOutgoingInlinks
 
   focusAnotherBlock $ label bFalse
-  blockAddQuad $ Simple ILitFalse
+  blockAddQuad LI1 $ Simple ILitFalse
   lit_false <- genMostRecentLabelIR
   blockAddOutgoingInlinks
 
   focusAnotherBlock $ label afterBlock
   let cond_phi = IAOrPhi $ (label bTrue, ILabel lit_true) : [(label bFalse, ILabel lit_false)]
-  blockAddQuad cond_phi
+  blockAddQuad LI1 cond_phi
   res <- genMostRecentLabelIR
-  l <- genLlabelIR
+  l <- genLlabelIR $ getLabelType res
   return [IExpr l $ Simple $ ILabel res]
 
 genOpFromMulOp :: L.MulOp' a -> ITBinOp
@@ -234,12 +264,12 @@ blockAddVar x l = do
   bb <- getBlock b
   changeBlock b $ bb {vars = M.insert x l $ vars bb}
 
-blockAddQuad :: IExpr' -> CFGIM ()
-blockAddQuad q = do
+blockAddQuad :: LabelType -> IExpr' -> CFGIM ()
+blockAddQuad lt q = do
   s <- get
   let b = curLabel s
   bb <- getBlock b
-  l <- genLlabelIR
+  l <- genLlabelIR lt
   changeBlock b $ bb {quads = IExpr l q : quads bb}
 
 blockAddManyQuads :: [IExpr] -> CFGIM ()
@@ -271,10 +301,10 @@ blockAddOutgoingInlinks = do
   case outLinks curB of
     None -> return ()
     Single nxt -> do
-      blockAddQuad $ IBr0 nxt
+      blockAddQuad LVoid $ IBr0 nxt
       blockAddInlink (label curB) nxt
     Cond c a b -> do
-      blockAddQuad $ IBrCond c a b
+      blockAddQuad LVoid $ IBrCond c a b -- FIXME na pewno?
       blockAddInlink (label curB) a
       blockAddInlink (label curB) b
     CheckLast a b -> do
@@ -291,10 +321,10 @@ blockUpdateVariableTrace varFirstLabel = do
 blockMakePhi :: [CFGBlock] -> Llabel -> CFGIM IExpr
 blockMakePhi inblocks v = do
   curB <- getCurrentBlock
-  l <- genLlabelIR
+  vtype <- getFromMapOrErr v $ varTypes curB
+  l <- genLlabelIR vtype
   blockVs <- mapM (getFromBlock v) inblocks
   changeBlock (label curB) $ curB {vars = M.insert v l $ vars curB}
-  vtype <- getFromMapOrErr v $ varTypes curB
   return $ IExpr l $ IPhi v vtype blockVs
   where
   getFromBlock :: Llabel -> CFGBlock -> CFGIM (Blabel, IExprSimple)
@@ -396,17 +426,17 @@ convertFuncToIR ((L.Decl _ type_ idents):st) = do
   addDecls :: L.Type -> [L.Item] -> CFGIM [(L.Ident, Llabel)]
   addDecls _ [] = return []
   addDecls (L.Int _p) ((L.NoInit _ x):dt) = do
-    blockAddQuad $ Simple $ ILitInt 0
+    blockAddQuad LI32 $ Simple $ ILitInt 0
     l <- genMostRecentLabelIR
     rest <- addDecls (L.Int _p) dt
     return $ (x, l) : rest
   addDecls (L.Bool _p) ((L.NoInit _ x):dt) = do
-    blockAddQuad $ Simple ILitFalse
+    blockAddQuad LI1 $ Simple ILitFalse
     l <- genMostRecentLabelIR
     rest <- addDecls (L.Bool _p) dt
     return $ (x, l) : rest
   addDecls (L.Str _p) ((L.NoInit _ x):dt) = do
-    blockAddQuad $ ILitString ""
+    convertAbsToIR (L.EString _p "")
     l <- genMostRecentLabelIR
     rest <- addDecls (L.Str _p) dt
     return $ (x, l) : rest
@@ -426,14 +456,14 @@ convertFuncToIR ((L.Incr _ x):st) = do
   curB <- getCurrentBlock
   xDefLabel <- getIdentDefLabel x
   lx <- getFromMapOrErr xDefLabel $ vars curB
-  blockAddQuad $ IBinOp IPlus (ILabel lx) (ILitInt 1)
+  blockAddQuad LI32 $ IBinOp IPlus (ILabel lx) (ILitInt 1)
   blockUpdateVariableTrace xDefLabel
   convertFuncToIR st
 convertFuncToIR ((L.Decr _d x):st) = do
   curB <- getCurrentBlock
   xDefLabel <- getIdentDefLabel x
   lx <- getFromMapOrErr xDefLabel $ vars curB
-  blockAddQuad $ IBinOp IMinus (ILabel lx) (ILitInt 1)
+  blockAddQuad LI32 $ IBinOp IMinus (ILabel lx) (ILitInt 1)
   blockUpdateVariableTrace xDefLabel
   convertFuncToIR st
 convertFuncToIR ((L.Ret _ e):st) = do
@@ -442,16 +472,16 @@ convertFuncToIR ((L.Ret _ e):st) = do
   es <- convertAbsToIR e
   blockAddManyQuads es
   l <- genMostRecentLabelIR
-  blockAddQuad $ IRet $ ILabel l
+  blockAddQuad (getLabelType l) $ IRet $ ILabel l
 convertFuncToIR ((L.VRet _):st) = do
   s <- get
   blockChangeOutlink (curLabel s) None
-  blockAddQuad IVRet
+  blockAddQuad LVoid IVRet
 convertFuncToIR ((L.Cond _ expr ifb):st) = do
   es <- convertAbsToIR expr
   blockAddManyQuads es
   let iflabel = lhs $ head es
-  brLabel <- genLlabelIR
+  brLabel <- genLlabelIR LI1
   curBlabel <- getCurrentBlabel
   afterBlock <- newBlockFromId curBlabel
   blockChangeOutlink curBlabel $ Single $ label afterBlock
@@ -465,7 +495,7 @@ convertFuncToIR ((L.CondElse _ expr ifok ifelse):st) = do
   blockAddManyQuads es
   let iflabel = lhs $ head es
   curBlabel <- getCurrentBlabel
-  brLabel <- genLlabelIR
+  brLabel <- genLlabelIR LI1
   afterBlock <- newBlockFromId curBlabel
   blockChangeOutlink curBlabel $ Single $ label afterBlock
   okBlock <- newBlockFromId curBlabel
@@ -485,7 +515,7 @@ convertFuncToIR ((L.While _ expr wb):st) = do
 
   s <- get
   put $ s {curLabel = label whileCondBlock}
-  fakeIflabel <- genLlabelIR
+  fakeIflabel <- genLlabelIR LI1
   blockChangeOutlink (label whileCondBlock) $ Cond fakeIflabel (label whileBodyBlock) (label afterBlock)
   blockAddInitialPhis
 

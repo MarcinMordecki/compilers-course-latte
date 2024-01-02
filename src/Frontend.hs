@@ -59,6 +59,8 @@ addPredefinedFunctions = do
   modify $ \s -> Store $ M.insert (L.Ident "error") (Fun (L.Ident "error") [] TVoid) (functions s)
   modify $ \s -> Store $ M.insert (L.Ident "readInt") (Fun (L.Ident "readInt") [] TInt) (functions s)
   modify $ \s -> Store $ M.insert (L.Ident "readString") (Fun (L.Ident "readString") [] TString) (functions s)
+  modify $ \s -> Store $ M.insert (L.Ident "concat") (Fun (L.Ident "concat") [TVar (L.Ident "dummy") TString, TVar (L.Ident "dummy2") TString] TString) (functions s)
+  modify $ \s -> Store $ M.insert (L.Ident "strineq") (Fun (L.Ident "strineq") [TVar (L.Ident "dummy") TString, TVar (L.Ident "dummy2") TString] TInt) (functions s)
 
 displayPos :: L.BNFC'Position -> String
 displayPos (L.BNFC'Position line col) = "at: line = " ++ show line ++ ", col = " ++ show col
