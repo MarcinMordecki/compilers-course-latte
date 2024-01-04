@@ -1,11 +1,6 @@
 module PropagateConstants where
 
-import Control.Monad.Reader
-import Control.Monad.Except
 import Control.Monad.State
-import Control.Monad.Identity
-import Control.Monad (when)
-import Data.Maybe(fromMaybe, isNothing)
 import qualified Data.Map as M
 import qualified AbsLatte as L
 import IR

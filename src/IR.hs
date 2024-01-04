@@ -103,14 +103,12 @@ data IExpr'
   | INeg IExprSimple
   | INot IExprSimple
   | IBinOp ITBinOp IExprSimple IExprSimple
-  | IStrPlus IExpr'
   | IAnd IExprSimple IExprSimple
   | IOr IExprSimple IExprSimple
   | IRet IExprSimple
   | IVRet
   -- | ILitString String
   | IStringBitcast IStringConstant
-  | IStringCmp Llabel Llabel
   deriving (Eq)
 instance Show IExpr' where
   show (Simple x) = show x

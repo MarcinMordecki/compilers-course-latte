@@ -10,6 +10,7 @@ import qualified Data.Map as M
 import qualified AbsLatte as L
 import CFG
 import IR
+import Gcse(optimizeGcse)
 import qualified PropagateConstants as PR
 import qualified FoldConstants as FC
 import qualified RemoveJumpingBlocks as RJB
@@ -38,12 +39,19 @@ convertFuncsToIR ftm prevSIdx ((L.FnDef pos ftype (L.Ident fname) fargs (L.Block
 -- FIXME uporządkuj bałagan w kolejności funkcji
 
 optimize :: Blabel -> CFGBMap -> IO CFGBMap
-optimize entryBlabel storeBlocks = do
-  (foundP, store) <- runStateT (PR.propagateConstants entryBlabel) $ PR.PropagateStore storeBlocks False (Llabel "dummy" LVoid) ILitFalse 0 False []
+optimize entryBlabel blocks = do
+  blocks1 <- optimizeSimplify entryBlabel blocks
+  blocks2 <- optimizeGcse entryBlabel blocks1
+  if blocks2 == blocks then return blocks2
+    else optimize entryBlabel blocks2
+
+optimizeSimplify :: Blabel -> CFGBMap -> IO CFGBMap
+optimizeSimplify entryBlabel blocks = do
+  (foundP, store) <- runStateT (PR.propagateConstants entryBlabel) $ PR.PropagateStore blocks False (Llabel "dummy" LVoid) ILitFalse 0 False []
   (foundF, fblocks) <- FC.foldConstants $ PR.blockMap store
   (foundJb, noJumpingBlocks) <- RJB.removeJumpingBlocks fblocks
   if foundF || foundP || foundJb then
-    optimize entryBlabel noJumpingBlocks
+    optimizeSimplify entryBlabel noJumpingBlocks
   else
     return noJumpingBlocks
 

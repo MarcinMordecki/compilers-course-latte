@@ -2,11 +2,7 @@ module RemoveJumpingBlocks where
 import CFG
 import IR
 import qualified Data.Map as M
-import Data.Maybe (mapMaybe)
-import Data.List (find, nub)
-import Data.Bifunctor ( Bifunctor(first) )
 import System.IO
-import Control.Monad.Reader
 
 
 type MergeBlockLink = (CFGBlock, CFGBlock, CFGBlock) -- removed, inlink, outlink
