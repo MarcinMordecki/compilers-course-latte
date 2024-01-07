@@ -14,50 +14,9 @@ import Gcse(optimizeGcse)
 import qualified PropagateConstants as PR
 import qualified FoldConstants as FC
 import qualified RemoveJumpingBlocks as RJB
+import qualified IndVar as IV
 import System.IO (hPrint, stderr)
 import System.Exit (exitWith, ExitCode (ExitFailure), exitFailure)
-
-convertFuncsToIR :: FuncTypesMap -> Int -> [L.TopDef' L.BNFC'Position] -> IO ()
-convertFuncsToIR _ _ [] = return ()
-convertFuncsToIR ftm prevSIdx ((L.FnDef pos ftype (L.Ident fname) fargs (L.Block _ fbody)):ft) = do
-  let fname_modded = modifyFname fname
-  let blabel = Blabel fname_modded
-  let (farg_topdefs, earg_map, vars_map, vartypes_map, inhvars_lst) = parseFargs fargs
-  let bmp = M.singleton blabel $ CFGBlock blabel None [] [] vars_map vartypes_map inhvars_lst 
-  ((), store) <- runReaderT (runStateT (convertFuncToIR fbody) (Store 1 LVoid 1 blabel bmp ftm M.empty prevSIdx)) $ Env earg_map
-  mapM_ (liftIO . (print . snd)) $ M.toList $ stringConstants store
-  printFtop (show $ mapType ftype) fname_modded farg_topdefs
-  
-  --((), _) <- runStateT (printBlocks (blocks store) True) (BFSOutput [] [blabel])
-  --liftIO $ putStr "versus: \n\n"
-  
-  cfgblocks <- optimize blabel $ blocks store
-  ((), _) <- runStateT (printBlocks cfgblocks True) (BFSOutput [] [blabel])
-  liftIO $ putStrLn "}"
-  convertFuncsToIR ftm (sidx store) ft
-  
--- FIXME uporządkuj bałagan w kolejności funkcji
-
-optimize :: Blabel -> CFGBMap -> IO CFGBMap
-optimize entryBlabel blocks = do
-  blocks1 <- optimizeSimplify entryBlabel blocks
-  blocks2 <- optimizeGcse entryBlabel blocks1
-  if blocks2 == blocks then return blocks2
-    else optimize entryBlabel blocks2
-
-optimizeSimplify :: Blabel -> CFGBMap -> IO CFGBMap
-optimizeSimplify entryBlabel blocks = do
-  (foundP, store) <- runStateT (PR.propagateConstants entryBlabel) $ PR.PropagateStore blocks False (Llabel "dummy" LVoid) ILitFalse 0 False []
-  (foundF, fblocks) <- FC.foldConstants $ PR.blockMap store
-  (foundJb, noJumpingBlocks) <- RJB.removeJumpingBlocks fblocks
-  if foundF || foundP || foundJb then
-    optimizeSimplify entryBlabel noJumpingBlocks
-  else
-    return noJumpingBlocks
-
--- vars :: M.Map Llabel Llabel,
---     varTypes :: M.Map Llabel LabelType,
---     inheritedVars :: [Llabel]
 
 parseFargs :: [L.Arg' a] -> ([String], M.Map L.Ident Llabel, M.Map Llabel Llabel, M.Map Llabel LabelType, [Llabel])
 parseFargs [] = ([], M.empty, M.empty, M.empty, [])
@@ -75,6 +34,38 @@ parseFargs ((L.Arg _p t (L.Ident x)):xt) =
   matchT (L.Bool _) = LI1
   matchT (L.Str _) = LI8
 
+convertFuncsToIR :: FuncTypesMap -> Int -> [L.TopDef' L.BNFC'Position] -> IO ()
+convertFuncsToIR _ _ [] = return ()
+convertFuncsToIR ftm prevSIdx ((L.FnDef pos ftype (L.Ident fname) fargs (L.Block _ fbody)):ft) = do
+  let blabel = Blabel fname
+  let (farg_topdefs, earg_map, vars_map, vartypes_map, inhvars_lst) = parseFargs fargs
+  let bmp = M.singleton blabel $ CFGBlock blabel None [] [] vars_map vartypes_map inhvars_lst 
+  ((), store) <- runReaderT (runStateT (convertFuncToIR fbody) (Store 1 LVoid 1 blabel bmp ftm M.empty prevSIdx)) $ Env earg_map
+  mapM_ (liftIO . (print . snd)) $ M.toList $ stringConstants store
+  printFtop (show $ mapType ftype) fname farg_topdefs
+  cfgblocks <- optimize blabel (idx store) $ blocks store
+  ((), _) <- runStateT (printBlocks cfgblocks True) (BFSOutput [] [blabel])
+  liftIO $ putStrLn "}"
+  convertFuncsToIR ftm (sidx store) ft
+
+optimize :: Blabel -> Int -> CFGBMap -> IO CFGBMap
+optimize entryBlabel lidx blocks = do
+  blocks1 <- optimizeSimplify entryBlabel blocks
+  blocks2 <- optimizeGcse entryBlabel blocks1
+  --(blocks3, lidx3) <- IV.optimizeIndVar entryBlabel lidx blocks2
+  if blocks2 == blocks then return blocks2
+    else optimize entryBlabel lidx blocks2
+
+optimizeSimplify :: Blabel -> CFGBMap -> IO CFGBMap
+optimizeSimplify entryBlabel blocks = do
+  (foundP, store) <- runStateT (PR.propagateConstants entryBlabel) $ PR.PropagateStore blocks False (Llabel "dummy" LVoid) ILitFalse 0 False []
+  (foundF, fblocks) <- FC.foldConstants $ PR.blockMap store
+  (foundJb, noJumpingBlocks) <- RJB.removeJumpingBlocks fblocks
+  if foundF || foundP || foundJb then
+    optimizeSimplify entryBlabel noJumpingBlocks
+  else
+    return noJumpingBlocks
+
 printFtop :: String -> String -> [String] -> IO ()
 printFtop ftype fname fargs = do
   liftIO $ putStrLn $ "define " ++ ftype ++ " @" ++ fname ++ "(" ++ printArgs fargs ++ ") {"
@@ -90,7 +81,6 @@ printBlocks blocks suppressFirstName = do
   put $ s {to_visit = remaining, visited = current : visited s}
   curB <- getFromMapOrErr2 current blocks
   let (Blabel blabel) = label curB
-  --unless suppressFirstName $ 
   liftIO $ putStrLn $ blabel ++ ":"
   displayQuads $ fixNoJumpQuad $ quads curB
   let out_blocks = outLinks curB
@@ -139,9 +129,7 @@ addPredefinedFunctions = M.fromList [
 addProgFunctions :: [L.TopDef' L.BNFC'Position] -> FuncTypesMap
 addProgFunctions [] = M.empty
 addProgFunctions ((L.FnDef pos ftype (L.Ident fname) fargs (L.Block _ fbody)):ft) = 
-  let 
-    rest = addProgFunctions ft 
-    fnameModded = modifyFname fname in
+  let rest = addProgFunctions ft in
     M.insert (L.Ident fname) (mapType ftype, map (\(L.Arg _ t _) -> mapType t) fargs) rest
 
 compile :: L.Program' L.BNFC'Position -> IO ()

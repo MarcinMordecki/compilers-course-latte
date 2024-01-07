@@ -66,38 +66,37 @@ getFromMapOrErr key map = do
           >> exitWith (ExitFailure 1)
       Just x -> return x
 
--- FIXME showLlabel sounds counterintuitive
-showLlabelIR :: Int -> LabelType -> Llabel
-showLlabelIR v = Llabel ("i_" ++ show v)
+llabelFromInt :: Int -> LabelType -> Llabel
+llabelFromInt v = Llabel ("i_" ++ show v)
 
-showBlabelIR :: Int -> Blabel
-showBlabelIR v = Blabel $ "b_" ++ show v
+blabelFromInt :: Int -> Blabel
+blabelFromInt v = Blabel $ "b_" ++ show v
 
-showSlabelIR :: Int -> Slabel
-showSlabelIR v = Slabel $ "@s" ++ show v
+slabelFromInt :: Int -> Slabel
+slabelFromInt v = Slabel $ "@s" ++ show v
 
 genLlabelIR :: LabelType -> CFGIM Llabel
 genLlabelIR lt = do
   s <- get
   put $ s {idx = idx s + 1, mostRecentLabelType = lt}
-  return $ showLlabelIR (idx s + 1) lt
+  return $ llabelFromInt (idx s + 1) lt
 
 genBlabelIR :: CFGIM Blabel
 genBlabelIR = do
   s <- get
   put $ s {bidx = bidx s + 1}
-  return $ showBlabelIR $ bidx s + 1
+  return $ blabelFromInt $ bidx s + 1
 
 genMostRecentLabelIR :: CFGIM Llabel
 genMostRecentLabelIR = do
   s <- get
-  return $ showLlabelIR (idx s) (mostRecentLabelType s)
+  return $ llabelFromInt (idx s) (mostRecentLabelType s)
 
 addStringConstant :: String -> CFGIM IStringConstant
 addStringConstant str = do
   s <- get
   let sx = sidx s + 1
-  let sc = IStringConstant (showSlabelIR sx) (length str) str
+  let sc = IStringConstant (slabelFromInt sx) (length str) str
   put $ s {stringConstants = M.insert str sc $ stringConstants s, sidx = sx}
   return sc
 
@@ -156,7 +155,7 @@ convertAbsToIR (L.Not _ x) = do
 convertAbsToIR (L.EMul _ a op b) = do
   (ira, la, irb, lb) <- eval2arg a b
   l <- genLlabelIR $ getLabelType la
-  return $ IExpr l (IBinOp (genOpFromMulOp op) (ILabel la) (ILabel lb)) : irb ++ ira -- FIXME mniejszy do większego
+  return $ IExpr l (IBinOp (genOpFromMulOp op) (ILabel la) (ILabel lb)) : irb ++ ira
 convertAbsToIR (L.EAdd _ a op b) = do
   (ira, la, irb, lb) <- eval2arg a b
   if getLabelType la == LI8 then do
@@ -304,7 +303,7 @@ blockAddOutgoingInlinks = do
       blockAddQuad LVoid $ IBr0 nxt
       blockAddInlink (label curB) nxt
     Cond c a b -> do
-      blockAddQuad LVoid $ IBrCond c a b -- FIXME na pewno?
+      blockAddQuad LVoid $ IBrCond c a b
       blockAddInlink (label curB) a
       blockAddInlink (label curB) b
     CheckLast a b -> do
@@ -338,8 +337,8 @@ blockAddInitialPhis = do
   inblocks <- mapM getBlock $ inLinks curB
   varPhis <- mapM (blockMakePhi inblocks) (inheritedVars curB)
   curB <- getCurrentBlock
-  unless (null (quads curB)) (liftIO $ print "INVALIDATING SOME QUADS!!!")
-  changeBlock (label curB) $ curB {quads = quads curB ++ varPhis}
+  unless (null (quads curB)) (fail "INVALIDATING SOME QUADS!!!")
+  changeBlock (label curB) $ curB {quads = quads curB ++ reverse varPhis}
 
 repairPhis :: CFGIM ()
 repairPhis = do
@@ -525,7 +524,6 @@ convertFuncToIR ((L.While _ expr wb):st) = do
   blockAddManyQuads [IExpr fakeIflabel $ Simple $ ILabel iflabel]
   blockAddOutgoingInlinks
 
-  -- FIXME zmienne indukcyjne?
   blockChangeOutlink (label whileBodyBlock) $ Single $ label whileCondBlock
   changeBlockAndConvertFunc (label whileBodyBlock) [wb]
 

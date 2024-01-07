@@ -7,36 +7,24 @@ import System.IO
 
 type MergeBlockLink = (CFGBlock, CFGBlock, CFGBlock) -- removed, inlink, outlink
 
--- jumpingBlock :: CFGBlock -> Maybe MergeBlockLink
--- jumpingBlock bl =
---   if length (quads bl) == 1 && length (inLinks bl) == 1 then
---     case head $ quads bl of
---       IExpr _ (IBr0 labelTo) -> Just (label bl, head $ inLinks bl, labelTo)
---       _ -> Nothing
---     else Nothing
 
 getJumping :: CFGBMap -> [CFGBlock] -> IO (Maybe MergeBlockLink)
 getJumping _ [] = return Nothing
 getJumping bmap (b:bt) = do
-  -- liftIO $ print $ show (length (quads b)) ++ " " ++ show (label b)
-  -- hFlush stdout
   case outLinks b of
     Single blink -> do
-      -- liftIO $ print $ "getJumping: " ++ show (label b) ++ " to " ++ show blink
       case M.lookup blink bmap of
         Just bnext -> do
-          -- liftIO $ print $ show (label b) ++ " " ++ show (label bnext)
           mblink <- checkRelay bmap b bnext 
           case mblink of
             Just mergeBlockLink -> return $ Just mergeBlockLink
             Nothing -> getJumping bmap bt
-        _ -> fail "impossible branch in getJumping" -- getJumping bmap bt -- impossible
+        _ -> fail "impossible branch in getJumping" 
     _ -> getJumping bmap bt
   where
     checkRelay :: CFGBMap -> CFGBlock -> CFGBlock -> IO (Maybe MergeBlockLink)
     checkRelay bmap bold bmid =
       if length (quads bmid) /= 1 || length (inLinks bmid) /= 1 then do
-        --liftIO $ print $ "sad length " ++ show (label bold) ++ " " ++ show (label bmid) ++ " " ++ show (length $ quads bmid) ++ " " ++ show (inLinks bmid)
         return Nothing else
         case outLinks bmid of
           Single labelBlast -> case M.lookup labelBlast bmap of
@@ -51,14 +39,9 @@ removeJumpingBlocks bmap = do
     Nothing -> return (False, bmap)
     Just triplet -> do
       let (removed, first, last) = triplet
-      --liftIO $ print $ show (label removed) ++ " " ++ show (label first) ++ " " ++ show (label last)
-      --liftIO $ print $ show (outLinks removed)
       let bmap0 = M.insert (label first) (fixOutlinks triplet) bmap
-      --liftIO $ print "spoko 1"
       let bmap1 = M.insert (label last) (fixInlinks triplet) bmap0
-      --liftIO $ print "spoko 2"
       let bmap2 = M.delete (label removed) bmap1
-      --liftIO $ print $ "spoko 3 " ++ show (bmap /= bmap2)
       if bmap == bmap2 then return (False, bmap) else do
         (_, bmap3) <- removeJumpingBlocks bmap2
         return (True, bmap3)

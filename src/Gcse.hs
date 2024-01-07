@@ -31,8 +31,8 @@ bfsCheck x = do
   s <- get
   xQuads <- getCommonQuads x $ gblocks s
   let curQ = nub $ currentQuads s ++ xQuads
-  let xQuadsNew = filter (`notElem` currentQuads s) curQ
-  -- liftIO $ print $ show x ++ " a new block " ++ show curQ
+  let xQuadsNew = if x `elem` everSeen s then filter (`elem` xQuads) curQ else curQ
+  -- liftIO $ print $ show x ++ " a new block " ++ show xQuadsNew ++ " WTF " ++ show curQ ++ " WTF2 " ++ show xQuads
   if xQuads == xQuadsNew && x `elem` everSeen s then return () else
     put $ s {
       commonQuads = M.insert x xQuadsNew $ commonQuads s,
@@ -75,8 +75,9 @@ findRepetitions ((IExpr l e):et) oldExprs = do
   case findInOldExprs (IExpr l e) oldExprs of
     Nothing -> findRepetitions et (IExpr l e : oldExprs)
     Just (IExpr ll ee) -> do
-      jajco <- findRepetitions et oldExprs
-      if l /= ll then return $ (l, ll) : jajco else return jajco
+      -- liftIO $ print $ show (IExpr l e) ++ " foundme " ++ show (IExpr ll ee)
+      x <- findRepetitions et oldExprs
+      if l /= ll then return $ (l, ll) : x else return x
 
 tryReplaceLabel :: Llabel -> M.Map Llabel Llabel -> Llabel
 tryReplaceLabel l substs = if M.member l substs then fromJust $ M.lookup l substs else l
@@ -112,12 +113,12 @@ optimizeGcse entryBlabel blocks = do
   let commonQuadsMap = commonQuads st
   -- liftIO $ print $ show blocks
   -- mapM_ (\x -> liftIO $ print $ show (label x) ++ " " ++ show (outLinks x) ++ " " ++ show (isJust $ M.lookup (label x) commonQuadsMap) ++ "\n") blocks
-  --mapM_ (\x -> liftIO $ print $ show x ++ "\n") $ M.toList commonQuadsMap
+  -- mapM_ (\x -> liftIO $ print $ show x ++ "\n") $ M.toList commonQuadsMap
   substs' <- mapM (\(bl, b) -> let {
     comQ = fromJust $ M.lookup bl commonQuadsMap
   } in findRepetitions (reverse $ quads b) comQ) $ M.toList blocks
   let substs = M.fromList $ concat substs'
   -- liftIO $ print $ show substs
-  let blocks1 = blocks--M.map (\b -> b {quads = replaceQuads substs $ quads b}) blocks
+  let blocks1 = M.map (\b -> b {quads = replaceQuads substs $ quads b}) blocks
   if blocks1 == blocks then return blocks1
     else optimizeGcse entryBlabel blocks1

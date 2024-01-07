@@ -136,13 +136,9 @@ instance Show IExpr' where
     getType ILitFalse = show LI1
     getType ILitTrue = show LI1
   show IVRet = "ret void"
-  -- show (ILitString x) = "FIXME ADD STRINGS!!!1 " ++ x
   show (IStringBitcast (IStringConstant sl len _)) = "bitcast [" ++ show (len + 1) ++ " x i8]* " ++ show sl ++ " to i8*"
 
 reservedFuncs = ["printInt", "printString", "error", "readInt", "readString", "main", "stringeq", "concat"]
-
-modifyFname :: String -> String
-modifyFname fname = if fname `elem` reservedFuncs then fname else fname ++ "_entry"  -- FIXME think it over
 
 display :: String -> IExpr' -> String
 display lhs (IBr0 x) = show $ IBr0 x
@@ -150,7 +146,7 @@ display lhs (IBrCond c a b) = show $ IBrCond c a b
 display lhs (IRet e) = show $ IRet e
 display lhs IVRet = show IVRet
 display lhs (IApp name typ argtyp args) = (if typ == LVoid then "" else "%" ++ lhs ++ " = ") ++ show (
-  IApp ((\(L.Ident n) -> L.Ident $ modifyFname n) name) typ argtyp args)
+  IApp name typ argtyp args)
 display lhs e = "%" ++ lhs ++ " = " ++ show e
 
 displayType :: IExprSimple -> String

@@ -64,7 +64,7 @@ chooseSub (Just (IExpr l (IPhi c t lst)):ct) = do
   s <- get
   let simp = simplifyPhiRhs lst l
   put $ s {propFound = True, toSub = l, subWith = if null simp then ILabel l else head $ simplifyPhiRhs lst l}
-chooseSub (Just (IExpr l (IAOrPhi lst)):ct) = do -- FIXME redundant?
+chooseSub (Just (IExpr l (IAOrPhi lst)):ct) = do 
   s <- get
   put $ s {propFound = True, toSub = l, subWith = head $ simplifyPhiRhs lst l}
 
@@ -73,12 +73,10 @@ doSub :: Blabel -> PropagateConstantsIM ()
 doSub entryBlabel = do
   s <- get
   bs <- mapM substitute $ M.toList $ blockMap s
-  -- above call modifies the "invalidatedInLinks" list as well. 
+  -- above call modifies the "invalidatedInLinks" list as well, hence another get.
   s <- get
   put $ s {blockMap = M.fromList bs}
-  --mapM_ (\x -> liftIO $ print $ show (fst x) ++ " ") bs
   unreachable <- findUnreachableBlocks entryBlabel
-  --liftIO $ print $ "MUY IMPORTANTE!!!!!!!!!!! " ++ show unreachable
   s <- get
   bs2 <- mapM cutInvalidatedPhi bs
   put $ s {blockMap = M.fromList $ filter (\(l, b) -> l `notElem` unreachable) bs2}
@@ -128,7 +126,7 @@ doSub entryBlabel = do
         return $ IExpr l $ Simple subBy
       else
         return $ IExpr l $ Simple (ILabel l2)
-  substituteWithinQuad subed subBy (IExpr l (Simple v)) = do -- FIXME not sure about this 1
+  substituteWithinQuad subed subBy (IExpr l (Simple v)) = do 
     if l == subed then
       return KilledIExpr
     else
@@ -182,9 +180,7 @@ doSub entryBlabel = do
 findUnreachableBlocks :: Blabel -> PropagateConstantsIM [Blabel]
 findUnreachableBlocks entry = do
   blocks <- gets blockMap
-  --liftIO $ print "bfs"
   ((), bfsout) <- liftIO $ runStateT (bfs blocks) $ BFSOutput [] [entry]
-  --liftIO $ print "bfs end"
   let unreachable = filter (\b -> label b `notElem` visited bfsout) (map snd $ M.toList blocks)
   mapM_ markOutlinks unreachable
   return $ map label unreachable
@@ -202,20 +198,16 @@ findUnreachableBlocks entry = do
     s <- get
     unless (null $ to_visit s) $ do
       let (v:rest) = to_visit s
-      --liftIO $ putStr $ show v ++ "   "
       put $ s {to_visit = rest, visited = v : visited s}
       b <- getFromMapOrErr2 v blocks
-      --liftIO $ putStr $ show (outLinks b) ++ " xd " ++ show (inLinks b) ++ "   " 
       case outLinks b of
         None -> return ()
         Single nextb -> bfsCheck nextb
         Cond _ nexta nextb -> do
           bfsCheck nexta
           bfsCheck nextb
-      --liftIO $ putStr "\n"
       bfs blocks
   bfsCheck :: Blabel -> OutputIM ()
   bfsCheck next = do
     s <- get
-    --liftIO $ putStr $ show next ++ " "
     unless (elem next (to_visit s) || elem next (visited s)) $ put $ s {to_visit = next : to_visit s}
